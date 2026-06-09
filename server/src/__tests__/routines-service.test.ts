@@ -180,7 +180,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       originKind: "routine_execution",
       originId: routine.id,
       originRunId: previousRunId,
-    });
+    }, { allowSystemOriginMetadata: true });
 
     await db.insert(routineRuns).values({
       id: previousRunId,
@@ -267,7 +267,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       originKind: "routine_execution",
       originId: routine.id,
       originRunId: previousRunId,
-    });
+    }, { allowSystemOriginMetadata: true });
 
     await db.insert(routineRuns).values({
       id: previousRunId,
