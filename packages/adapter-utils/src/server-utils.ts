@@ -202,6 +202,13 @@ export function redactEnvForLogs(env: Record<string, string>): Record<string, st
 }
 
 export function buildPaperclipEnv(agent: { id: string; companyId: string }): Record<string, string> {
+  const firstNonEmpty = (...values: Array<string | undefined>): string | undefined => {
+    for (const value of values) {
+      const trimmed = value?.trim();
+      if (trimmed) return trimmed;
+    }
+    return undefined;
+  };
   const resolveHostForUrl = (rawHost: string): string => {
     const host = rawHost.trim();
     if (!host || host === "0.0.0.0" || host === "::") return "localhost";
@@ -216,7 +223,12 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
     process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
   );
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100";
-  const apiUrl = process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`;
+  const apiUrl = firstNonEmpty(
+    process.env.PAPERCLIP_PUBLIC_URL,
+    process.env.PAPERCLIP_AUTH_PUBLIC_BASE_URL,
+    process.env.BETTER_AUTH_URL,
+    process.env.BETTER_AUTH_BASE_URL,
+  ) ?? `http://${runtimeHost}:${runtimePort}`;
   vars.PAPERCLIP_API_URL = apiUrl;
   return vars;
 }

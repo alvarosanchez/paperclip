@@ -15,6 +15,7 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_HOME` | `~/.paperclip` | Base directory for all Paperclip data |
 | `PAPERCLIP_INSTANCE_ID` | `default` | Instance identifier (for multiple local instances) |
 | `PAPERCLIP_DEPLOYMENT_MODE` | `local_trusted` | Runtime mode override |
+| `PAPERCLIP_PUBLIC_URL` | (derived from listen host/port) | Public control-plane base URL used when injecting `PAPERCLIP_API_URL` into agent heartbeats |
 
 ## Secrets
 
@@ -41,6 +42,8 @@ These are set automatically by the server when invoking agents:
 | `PAPERCLIP_APPROVAL_ID` | Resolved approval ID |
 | `PAPERCLIP_APPROVAL_STATUS` | Approval decision |
 | `PAPERCLIP_LINKED_ISSUE_IDS` | Comma-separated linked issue IDs |
+
+`PAPERCLIP_API_URL` is generated for agent runs. Public deployments should set `PAPERCLIP_PUBLIC_URL` or `PAPERCLIP_AUTH_PUBLIC_BASE_URL` to the live control-plane base instead of relying on an inherited `PAPERCLIP_API_URL` in the server process environment.
 
 ## LLM Provider Keys (for adapters)
 
