@@ -1,2 +1,3 @@
 ALTER TABLE "issues" ADD COLUMN "origin_fingerprint" text;--> statement-breakpoint
-CREATE INDEX "issues_company_origin_run_fingerprint_idx" ON "issues" USING btree ("company_id","origin_kind","origin_run_id","origin_fingerprint");
+CREATE INDEX "issues_company_origin_run_fingerprint_idx" ON "issues" USING btree ("company_id","origin_kind","origin_run_id","origin_fingerprint");--> statement-breakpoint
+CREATE UNIQUE INDEX "issues_open_stale_active_run_review_uq" ON "issues" USING btree ("company_id","origin_kind","parent_id","origin_run_id","origin_fingerprint") WHERE "origin_kind" = 'stale_active_run_evaluation' and "parent_id" is not null and "origin_run_id" is not null and "origin_fingerprint" is not null and "hidden_at" is null and "status" in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked');

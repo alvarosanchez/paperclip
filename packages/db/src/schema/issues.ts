@@ -80,6 +80,16 @@ export const issues = pgTable(
       table.originRunId,
       table.originFingerprint,
     ),
+    openStaleActiveRunReviewIdx: uniqueIndex("issues_open_stale_active_run_review_uq")
+      .on(table.companyId, table.originKind, table.parentId, table.originRunId, table.originFingerprint)
+      .where(
+        sql`${table.originKind} = 'stale_active_run_evaluation'
+          and ${table.parentId} is not null
+          and ${table.originRunId} is not null
+          and ${table.originFingerprint} is not null
+          and ${table.hiddenAt} is null
+          and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
+      ),
     projectWorkspaceIdx: index("issues_company_project_workspace_idx").on(table.companyId, table.projectWorkspaceId),
     executionWorkspaceIdx: index("issues_company_execution_workspace_idx").on(table.companyId, table.executionWorkspaceId),
     identifierIdx: uniqueIndex("issues_identifier_idx").on(table.identifier),

@@ -7939,6 +7939,46 @@
           "method": "btree",
           "with": {}
         },
+        "issues_open_stale_active_run_review_uq": {
+          "name": "issues_open_stale_active_run_review_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "origin_kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "parent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "origin_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "origin_fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"issues\".\"origin_kind\" = 'stale_active_run_evaluation'\n          and \"issues\".\"parent_id\" is not null\n          and \"issues\".\"origin_run_id\" is not null\n          and \"issues\".\"origin_fingerprint\" is not null\n          and \"issues\".\"hidden_at\" is null\n          and \"issues\".\"status\" in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "issues_company_project_workspace_idx": {
           "name": "issues_company_project_workspace_idx",
           "columns": [
