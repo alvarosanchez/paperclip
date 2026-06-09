@@ -152,9 +152,6 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Install Playwright
-        run: pnpm exec playwright install --with-deps chrome
-
       - name: Generate Paperclip config
         run: |
           mkdir -p ~/.paperclip/instances/default
