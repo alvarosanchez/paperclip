@@ -1,0 +1,2 @@
+ALTER TABLE "issues" ADD COLUMN "origin_fingerprint" text;--> statement-breakpoint
+CREATE INDEX "issues_company_origin_run_fingerprint_idx" ON "issues" USING btree ("company_id","origin_kind","origin_run_id","origin_fingerprint");

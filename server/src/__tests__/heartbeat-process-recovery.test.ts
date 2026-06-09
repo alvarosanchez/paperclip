@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -251,5 +251,120 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const run = await heartbeat.getRun(runId);
     expect(run?.errorCode).toBeNull();
     expect(run?.error).toBeNull();
+  });
+
+  it("reuses one stale active-run review for repeated generator evaluations", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const managerId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      issueCounter: 1,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: managerId,
+        companyId,
+        name: "CTO",
+        role: "manager",
+        status: "active",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: agentId,
+        companyId,
+        name: "CEO",
+        role: "ceo",
+        status: "running",
+        reportsTo: managerId,
+        adapterType: "opencode_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values({
+      id: sourceIssueId,
+      companyId,
+      title: "Daily CEO Self-Improvement",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId: sourceIssueId },
+      status: "claimed",
+      runId,
+      claimedAt: new Date("2026-06-09T10:00:00.000Z"),
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      wakeupRequestId,
+      contextSnapshot: { issueId: sourceIssueId },
+      startedAt: new Date("2026-06-09T10:00:00.000Z"),
+      updatedAt: new Date("2026-06-09T10:00:00.000Z"),
+    });
+    await db.insert(heartbeatRunEvents).values({
+      companyId,
+      runId,
+      agentId,
+      seq: 2,
+      eventType: "log",
+      stream: "stdout",
+      level: "info",
+      message: "last output",
+      createdAt: new Date("2026-06-09T10:05:00.000Z"),
+    });
+
+    const heartbeat = heartbeatService(db);
+    const first = await heartbeat.evaluateStaleActiveRuns({
+      now: new Date("2026-06-09T11:10:00.000Z"),
+    });
+    const second = await heartbeat.evaluateStaleActiveRuns({
+      now: new Date("2026-06-09T14:10:00.000Z"),
+    });
+
+    expect(first.createdOrReused).toBe(1);
+    expect(second.createdOrReused).toBe(1);
+    expect(second.issueIds[0]).toBe(first.issueIds[0]);
+
+    const reviewRows = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.originKind, "stale_active_run_evaluation"),
+      ));
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]?.parentId).toBe(sourceIssueId);
+    expect(reviewRows[0]?.originRunId).toBe(runId);
+    expect(reviewRows[0]?.originFingerprint).toBe(`stale_active_run:${companyId}:${runId}`);
+    expect(reviewRows[0]?.assigneeAgentId).toBe(managerId);
+    expect(reviewRows[0]?.priority).toBe("high");
+    expect(reviewRows[0]?.description).toContain("critical output silence");
   });
 });

@@ -63,6 +63,9 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
+const STALE_ACTIVE_RUN_REVIEW_ORIGIN_KIND = "stale_active_run_evaluation";
+const STALE_ACTIVE_RUN_SUSPICIOUS_AFTER_MS = 60 * 60 * 1000;
+const STALE_ACTIVE_RUN_CRITICAL_AFTER_MS = 4 * 60 * 60 * 1000;
 const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -263,6 +266,15 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
 
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function formatDuration(ms: number) {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) return `${minutes}m`;
+  if (minutes <= 0) return `${hours}h`;
+  return `${hours}h ${minutes}m`;
 }
 
 function normalizeLedgerBillingType(value: unknown): BillingType {
@@ -1839,6 +1851,106 @@ export function heartbeatService(db: Db) {
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
+  }
+
+  async function evaluateStaleActiveRuns(opts?: {
+    now?: Date;
+    suspiciousAfterMs?: number;
+    criticalAfterMs?: number;
+  }) {
+    const now = opts?.now ?? new Date();
+    const suspiciousAfterMs = opts?.suspiciousAfterMs ?? STALE_ACTIVE_RUN_SUSPICIOUS_AFTER_MS;
+    const criticalAfterMs = opts?.criticalAfterMs ?? STALE_ACTIVE_RUN_CRITICAL_AFTER_MS;
+    const activeRuns = await db
+      .select({
+        run: heartbeatRuns,
+        agent: agents,
+        wakeupPayload: agentWakeupRequests.payload,
+      })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
+      .leftJoin(agentWakeupRequests, eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id))
+      .where(eq(heartbeatRuns.status, "running"));
+
+    let evaluated = 0;
+    let createdOrReused = 0;
+    const issueIds: string[] = [];
+
+    for (const { run, agent, wakeupPayload } of activeRuns) {
+      const context = parseObject(run.contextSnapshot);
+      const payload = parseObject(wakeupPayload);
+      const sourceIssueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(payload.issueId);
+      if (!sourceIssueId) continue;
+
+      const sourceIssue = await issuesSvc.getById(sourceIssueId);
+      if (!sourceIssue || sourceIssue.companyId !== run.companyId) continue;
+
+      const lastOutput = await db
+        .select({
+          at: sql<Date | null>`max(${heartbeatRunEvents.createdAt})`,
+          seq: sql<number | null>`max(${heartbeatRunEvents.seq})`,
+        })
+        .from(heartbeatRunEvents)
+        .where(and(
+          eq(heartbeatRunEvents.runId, run.id),
+          inArray(heartbeatRunEvents.stream, ["stdout", "stderr"]),
+        ))
+        .then((rows) => rows[0] ?? null);
+      const lastOutputAt = lastOutput?.at ?? run.updatedAt ?? run.startedAt ?? run.createdAt;
+      const silentForMs = now.getTime() - new Date(lastOutputAt).getTime();
+      if (silentForMs < suspiciousAfterMs) continue;
+
+      evaluated += 1;
+      const critical = silentForMs >= criticalAfterMs;
+      const priority = critical ? "high" : "medium";
+      const originFingerprint = `stale_active_run:${run.companyId}:${run.id}`;
+      const title = `Review silent active run for ${agent.name}`;
+      const description = [
+        `Paperclip detected ${critical ? "critical" : "suspicious"} output silence on an active heartbeat run.`,
+        "",
+        "## Run",
+        "",
+        `- Run: ${run.id}`,
+        `- Agent: ${agent.name} (${agent.adapterType})`,
+        `- Invocation: ${run.invocationSource} / ${run.triggerDetail ?? "unknown"}`,
+        `- Source issue: ${sourceIssue.identifier ?? sourceIssue.id}`,
+        `- Started at: ${(run.startedAt ?? run.createdAt).toISOString()}`,
+        `- Last output at: ${new Date(lastOutputAt).toISOString()}`,
+        `- Last output sequence: ${lastOutput?.seq ?? "none"}`,
+        `- Silent for: ${formatDuration(silentForMs)}`,
+        `- Thresholds: suspicious after ${formatDuration(suspiciousAfterMs)}, critical after ${formatDuration(criticalAfterMs)}`,
+        "",
+        "## Decision Checklist",
+        "",
+        "- Continue or snooze if the run is intentionally quiet.",
+        "- Ask the run owner for context if work may be delegated outside the transcript.",
+        "- Preserve artifacts, branch state, and useful output before cancellation.",
+        "- Cancel or recover through the normal heartbeat controls if the run is stuck.",
+      ].join("\n");
+
+      const review = await issuesSvc.create(run.companyId, {
+        projectId: sourceIssue.projectId,
+        projectWorkspaceId: sourceIssue.projectWorkspaceId,
+        goalId: sourceIssue.goalId,
+        parentId: sourceIssue.id,
+        title,
+        description,
+        status: "todo",
+        priority,
+        assigneeAgentId: agent.reportsTo ?? sourceIssue.assigneeAgentId ?? null,
+        originKind: STALE_ACTIVE_RUN_REVIEW_ORIGIN_KIND,
+        originId: run.id,
+        originRunId: run.id,
+        originFingerprint,
+        assigneeAdapterOverrides: { modelProfile: "cheap" },
+        executionWorkspaceId: sourceIssue.executionWorkspaceId,
+        executionWorkspacePreference: sourceIssue.executionWorkspaceId ? "reuse_existing" : null,
+      }, { allowSystemOriginMetadata: true });
+      createdOrReused += 1;
+      issueIds.push(review.id);
+    }
+
+    return { evaluated, createdOrReused, issueIds };
   }
 
   async function updateRuntimeState(
@@ -3802,6 +3914,8 @@ export function heartbeatService(db: Db) {
     reapOrphanedRuns,
 
     resumeQueuedRuns,
+
+    evaluateStaleActiveRuns,
 
     tickTimers: async (now = new Date()) => {
       const allAgents = await db.select().from(agents);

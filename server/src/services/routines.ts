@@ -596,7 +596,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             originKind: "routine_execution",
             originId: input.routine.id,
             originRunId: createdRun.id,
-          });
+          }, { allowSystemOriginMetadata: true });
         } catch (error) {
           const isOpenExecutionConflict =
             !!error &&

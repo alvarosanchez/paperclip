@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -35,6 +35,14 @@ import { getDefaultCompanyGoal } from "./goals.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
+const STALE_ACTIVE_RUN_ORIGIN_KIND = "stale_active_run_evaluation";
+const STALE_ACTIVE_RUN_TERMINAL_DEDUPE_WINDOW_MS = 60 * 60 * 1000;
+const ISSUE_PRIORITY_RANK: Record<string, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3,
+};
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
@@ -59,6 +67,24 @@ function applyStatusSideEffects(
     patch.cancelledAt = new Date();
   }
   return patch;
+}
+
+function isTerminalIssueStatus(status: string) {
+  return status === "done" || status === "cancelled";
+}
+
+function higherPriority(current: string, next: string | undefined | null) {
+  if (!next) return current;
+  return (ISSUE_PRIORITY_RANK[next] ?? -1) > (ISSUE_PRIORITY_RANK[current] ?? -1) ? next : current;
+}
+
+type IssueOriginMetadata = Pick<typeof issues.$inferInsert, "originKind" | "originId" | "originRunId" | "originFingerprint">;
+
+function stripSystemOriginMetadata<T extends Partial<IssueOriginMetadata>>(data: T) {
+  delete data.originKind;
+  delete data.originId;
+  delete data.originRunId;
+  delete data.originFingerprint;
 }
 
 export interface IssueFilters {
@@ -560,6 +586,74 @@ export function issueService(db: Db) {
     return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
   }
 
+  async function findMatchingStaleActiveRunReview(
+    tx: any,
+    companyId: string,
+    issueData: Partial<typeof issues.$inferInsert>,
+    now: Date,
+  ) {
+    if (issueData.originKind !== STALE_ACTIVE_RUN_ORIGIN_KIND) return null;
+    if (!issueData.originRunId || !issueData.originFingerprint) return null;
+
+    const sourceCondition = issueData.parentId
+      ? eq(issues.parentId, issueData.parentId)
+      : issueData.originId
+        ? eq(issues.originId, issueData.originId)
+        : null;
+    if (!sourceCondition) return null;
+
+    const recentTerminalCutoff = new Date(now.getTime() - STALE_ACTIVE_RUN_TERMINAL_DEDUPE_WINDOW_MS);
+    const rows = await tx
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.originKind, STALE_ACTIVE_RUN_ORIGIN_KIND),
+        eq(issues.originRunId, issueData.originRunId),
+        eq(issues.originFingerprint, issueData.originFingerprint),
+        sourceCondition,
+        isNull(issues.hiddenAt),
+        or(
+          inArray(issues.status, ["backlog", "todo", "in_progress", "in_review", "blocked"]),
+          and(
+            inArray(issues.status, ["done", "cancelled"]),
+            or(
+              gte(issues.completedAt, recentTerminalCutoff),
+              gte(issues.cancelledAt, recentTerminalCutoff),
+            )!,
+          ),
+        )!,
+      ))
+      .orderBy(desc(issues.updatedAt), desc(issues.createdAt));
+    return rows[0] ?? null;
+  }
+
+  async function reuseStaleActiveRunReview(
+    tx: any,
+    existing: IssueRow,
+    issueData: Partial<typeof issues.$inferInsert>,
+    now: Date,
+  ) {
+    if (isTerminalIssueStatus(existing.status)) {
+      const [enriched] = await withIssueLabels(tx, [existing]);
+      return enriched;
+    }
+    const patch: Partial<typeof issues.$inferInsert> = {
+      updatedAt: now,
+      priority: higherPriority(existing.priority, issueData.priority),
+    };
+    if (issueData.title) patch.title = issueData.title;
+    if (issueData.description !== undefined) patch.description = issueData.description;
+    const updated = await tx
+      .update(issues)
+      .set(patch)
+      .where(eq(issues.id, existing.id))
+      .returning()
+      .then((rows: IssueRow[]) => rows[0] ?? existing);
+    const [enriched] = await withIssueLabels(tx, [updated]);
+    return enriched;
+  }
+
   async function adoptStaleCheckoutRun(input: {
     issueId: string;
     actorAgentId: string;
@@ -852,8 +946,12 @@ export function issueService(db: Db) {
     create: async (
       companyId: string,
       data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+      options?: { allowSystemOriginMetadata?: boolean },
     ) => {
       const { labelIds: inputLabelIds, ...issueData } = data;
+      if (!options?.allowSystemOriginMetadata) {
+        stripSystemOriginMetadata(issueData);
+      }
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -879,6 +977,12 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        const now = new Date();
+        const staleActiveRunMatch = await findMatchingStaleActiveRunReview(tx, companyId, issueData, now);
+        if (staleActiveRunMatch) {
+          return reuseStaleActiveRunReview(tx, staleActiveRunMatch, issueData, now);
+        }
+
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         let executionWorkspaceSettings =
@@ -942,13 +1046,13 @@ export function issueService(db: Db) {
           identifier,
         } as typeof issues.$inferInsert;
         if (values.status === "in_progress" && !values.startedAt) {
-          values.startedAt = new Date();
+          values.startedAt = now;
         }
         if (values.status === "done") {
-          values.completedAt = new Date();
+          values.completedAt = now;
         }
         if (values.status === "cancelled") {
-          values.cancelledAt = new Date();
+          values.cancelledAt = now;
         }
 
         const [issue] = await tx.insert(issues).values(values).returning();
@@ -961,6 +1065,7 @@ export function issueService(db: Db) {
     },
 
     update: async (id: string, data: Partial<typeof issues.$inferInsert> & { labelIds?: string[] }) => {
+      stripSystemOriginMetadata(data);
       const existing = await db
         .select()
         .from(issues)
