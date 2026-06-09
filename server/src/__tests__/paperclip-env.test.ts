@@ -54,7 +54,7 @@ afterEach(() => {
 
 describe("buildPaperclipEnv", () => {
   it("prefers an explicit public URL", () => {
-    process.env.PAPERCLIP_PUBLIC_URL = "https://paperclip.example.com";
+    process.env.PAPERCLIP_PUBLIC_URL = "https://paperclip.example.com/";
     process.env.PAPERCLIP_LISTEN_HOST = "127.0.0.1";
     process.env.PAPERCLIP_LISTEN_PORT = "3101";
 

@@ -204,7 +204,7 @@ export function redactEnvForLogs(env: Record<string, string>): Record<string, st
 export function buildPaperclipEnv(agent: { id: string; companyId: string }): Record<string, string> {
   const firstNonEmpty = (...values: Array<string | undefined>): string | undefined => {
     for (const value of values) {
-      const trimmed = value?.trim();
+      const trimmed = value?.trim().replace(/\/+$/, "");
       if (trimmed) return trimmed;
     }
     return undefined;
